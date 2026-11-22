@@ -1,7 +1,13 @@
-HALLOW EMAIL 1.0 - a private desktop email client, Hallow style
+HALLOW EMAIL 1.1 - a private desktop email client, Hallow style
 
 INSTALL: right-click the zip > Properties > Unblock, Extract All, then double-click INSTALL.bat (no admin needed).
 It installs to %LOCALAPPDATA%\Programs\Hallow Email. Your data: %APPDATA%\HallowEmail (encrypted).
+
+WHAT'S NEW IN 1.1
+- Settings > Accounts says why an account needs attention, in plain words: the sign-in failed, an app password is
+  needed, the server can't be reached, or the mailbox / provider limit is full.
+- Hallow Remote and Hub can show unread mail per account and that reason (by your own account label - Hallow Email never
+  adds your address).
 
 WHAT'S NEW IN 1.0
 - IMAP / SMTP accounts with app passwords: Gmail, Outlook / Hotmail, Yahoo, iCloud, or any provider. The add-account

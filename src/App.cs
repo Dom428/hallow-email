@@ -18,14 +18,14 @@ using WF = System.Windows.Forms;
 [assembly: AssemblyTitle("Hallow Email")]
 [assembly: AssemblyProduct("Hallow Email")]
 [assembly: AssemblyDescription("A private desktop email client, Hallow style")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 namespace HallowEmail
 {
     public static class Program
     {
-        public const string Version = "1.0";
+        public const string Version = "1.1";
         [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr v);
 
         // MailKit / MimeKit and their helpers sit next to the exe; older references (System.Memory 4.0.1.x etc.) are answered with the copy we ship
@@ -323,7 +323,7 @@ namespace HallowEmail
         {
             var acc = E.UnreadPerAccount();
             var d = new Dictionary<string, object> { { "app", "Email" }, { "version", Program.Version }, { "updated", Family.Time(DateTime.Now) }, { "running", running },
-                { "accounts", acc }, { "unread", acc.Sum(x => (int)x["unread"]) } };
+                { "accounts", acc }, { "unread", acc.Sum(x => (int)x["unread"]) }, { "needsAttention", acc.Count(x => (bool)x["needsAttention"]) } };
             lock (P) { d["outbox"] = P.Outbox.Count; d["snoozed"] = P.Snoozed.Count; }
             d["screener"] = S.Screener; d["spamFilter"] = S.SpamFilter; d["look"] = Program.Light ? "light" : "dark"; d["startsWithWindows"] = StartsWithWindows();
             d["lastCrash"] = Crash.LastTime() == null ? null : Family.Time(Crash.LastTime().Value);
@@ -338,6 +338,8 @@ namespace HallowEmail
             {
                 case "ping": return "ok " + Family.Json(new Dictionary<string, object> { { "app", "Email" }, { "version", Program.Version } });
                 case "status": { var d = StatusData(true); Family.WriteStatus(Family.Json(d)); return "ok " + Family.Json(d); }
+                // 1.1: just the accounts (opaque id, label, unread, attention) for Remote / Hub
+                case "accounts": { var acc = E.UnreadPerAccount(); return "ok " + Family.Json(new Dictionary<string, object> { { "app", "Email" }, { "accounts", acc }, { "unread", acc.Sum(x => (int)x["unread"]) }, { "needsAttention", acc.Count(x => (bool)x["needsAttention"]) } }); }
                 case "open": return OnUi(() => { var p = arg.Length > 0 ? MainWindow.PageId(arg) : null; if (arg.Length > 0 && p == null) return "error no page called " + arg; ShowMain(p); return "ok"; });
                 case "compose":
                     {
@@ -391,6 +393,13 @@ namespace HallowEmail
                 case "test-autostart": SetStartWithWindows(arg == "on"); return "ok " + StartsWithWindows();
                 case "test-notes": lock (NotifyLog) return "ok " + Family.Json(NotifyLog.Select(n => n[0]).ToList());
                 case "test-items": return "ok " + Store.All().Count;
+                case "test-account":
+                    {
+                        // test copies only: "<id> <preset> <imap port> <smtp port> <password> [label...]" - an account on this PC's IMAP / SMTP stand-in
+                        var a = arg.Split(new[] { ' ' }, 6); if (a.Length < 5) return "error use: test-account <id> <preset> <imap port> <smtp port> <password> [label]";
+                        var acc = new Account { Id = a[0], Email = "alex@example.test", Name = "Alex", Label = a.Length > 5 ? a[5] : "", Preset = a[1], ImapHost = "127.0.0.1", ImapPort = int.Parse(a[2]), ImapSecurity = "none", SmtpHost = "127.0.0.1", SmtpPort = int.Parse(a[3]), SmtpSecurity = "none", SendAs = new List<string>() };
+                        AddAccount(acc, a[4], null, null); return "ok";
+                    }
             }
             return "error unknown test command";
         }

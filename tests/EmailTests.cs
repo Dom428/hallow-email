@@ -8,6 +8,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
+using MailKit.Security;
 using MimeKit;
 
 namespace HallowEmail.Tests
@@ -18,12 +19,14 @@ namespace HallowEmail.Tests
         static void Ok(bool c, string what) { if (c) { pass++; Console.WriteLine("ok   " + what); } else { fail++; fails.Add(what); Console.WriteLine("FAIL " + what); } }
         static void Eq<T>(T want, T got, string what) { Ok(Equals(want, got), what + (Equals(want, got) ? "" : " (want " + want + ", got " + got + ")")); }
         static bool Until(Func<bool> f, int ms) { var end = DateTime.Now.AddMilliseconds(ms); while (DateTime.Now < end) { try { if (f()) return true; } catch { } Thread.Sleep(50); } try { return f(); } catch { return false; } }
-        static string Out;
+        static string Out; static readonly List<Process> Children = new List<Process>();
 
         [STAThread]
         public static int Main(string[] args)
         {
             Program.Resolver();
+            // 5-minute kill timeout: a hung server stand-in or pipe can't hang the build
+            new Thread(() => { Thread.Sleep(TimeSpan.FromMinutes(5)); Console.WriteLine("FAIL the tests took longer than 5 minutes - killed"); foreach (var pr in Children) try { if (!pr.HasExited) pr.Kill(); } catch { } Environment.Exit(3); }) { IsBackground = true }.Start();
             try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
             Out = Path.Combine(Path.GetDirectoryName(typeof(Run).Assembly.Location), "out");
             try { if (Directory.Exists(Out)) Directory.Delete(Out, true); } catch { }
@@ -32,7 +35,7 @@ namespace HallowEmail.Tests
             Trackers.ShieldRulesDir = Path.Combine(Out, "no-lists");
             Dialogs.AutoAnswer = t => true;
             foreach (var t in new Action[] { VaultTests, CacheTests, LookTests, PrivacyTests, ShieldListTests, PhishTests, AttachmentTests, DefenderTests, SortTests, ThreadSearchTests,
-                SpamTests, RuleTests, SuggestionTests, ScreenerTests, UnsubTests, CloudflareTests, OAuthTests, NoteTests, ImapTests, PipeTests, () => WebViewTests.Run(Ok, Out) })
+                SpamTests, RuleTests, SuggestionTests, ScreenerTests, UnsubTests, CloudflareTests, OAuthTests, NoteTests, ImapTests, AttentionTests, PipeTests, () => WebViewTests.Run(Ok, Out) })
             {
                 try { t(); } catch (Exception e) { Ok(false, t.Method.Name + " threw " + e.GetType().Name + ": " + e.Message + "\n" + e.StackTrace); }
             }
@@ -563,6 +566,7 @@ namespace HallowEmail.Tests
                 Ok(Until(() => { E.Tick(); return due.Count == 1; }, 5000) && !E.IsSnoozed(snz), "snooze: comes back with a reminder");
                 // status for the family link: counts only
                 var stat = Family.Json(E.UnreadPerAccount());
+                Ok(stat.Contains("\"id\":\"t1\"") && stat.Contains("\"label\":\"Test\"") && stat.Contains("\"labelUserChosen\":true") && stat.Contains("\"labelHasAddress\":false") && stat.Contains("\"needsAttention\":false") && stat.Contains("\"attention\":null"), "status 1.1: opaque id, the user's label, no attention: " + stat);
                 Ok(stat.Contains("\"account\":\"Test\"") && !stat.Contains("@") && !stat.Contains("hike") && !stat.Contains("Coffee"), "status: unread per account, no addresses or subjects: " + stat);
                 // the cache on disk is encrypted and reloads
                 store.Save("t1");
@@ -584,6 +588,46 @@ namespace HallowEmail.Tests
             finally { E.StopAll(); imap.Stop(); smtp.Stop(); Secrets.RemoveAccount("t1"); }
         }
 
+        // ---------------- 1.1: why an account needs attention (code + plain words), from exceptions and from the IMAP stand-in's answers
+        static void AttentionTests()
+        {
+            Eq("app-password-needed", Attention.Classify(new AuthenticationException("[ALERT] Application-specific password required: https://support.google.com/accounts/answer/185833")), "attention: Gmail's app-password answer");
+            Eq("app-password-needed", Attention.Classify(new AuthenticationException("[ALERT] Please log in via your web browser")), "attention: \"log in via your web browser\"");
+            Eq("sign-in-failed", Attention.Classify(new AuthenticationException("[AUTHENTICATIONFAILED] Invalid credentials (Failure)")), "attention: wrong password");
+            Eq("quota", Attention.Classify(new AuthenticationException("[ALERT] Account exceeded command or bandwidth limits")), "attention: provider limits (even when the sign-in is refused)");
+            Eq("quota", Attention.Classify(new Exception("[OVERQUOTA] Mailbox is full")), "attention: mailbox full");
+            Eq("server-unreachable", Attention.Classify(new System.Net.Sockets.SocketException(10061)), "attention: connection refused");
+            Eq("server-unreachable", Attention.Classify(new IOException("x", new TimeoutException())), "attention: time-out");
+            Eq("error", Attention.Classify(new InvalidOperationException("something odd")), "attention: anything else");
+            Ok(Attention.Classify(null) == null && Attention.Text(null) == null, "attention: none");
+            Ok(Attention.Codes.All(cd => { var tx = Attention.Text(cd); return tx != null && tx.Length > 20 && !tx.Contains("@"); }), "attention: every code has plain words");
+            Ok(Attention.LooksLikeAddress("me@home.example") && !Attention.LooksLikeAddress("Personal") && !Attention.LooksLikeAddress("@work"), "labels that look like an address");
+            Ok(!Engine.LabelUserChosen(new Account { Label = "Gmail", Preset = "gmail" }) && Engine.LabelUserChosen(new Account { Label = "Personal", Preset = "gmail" }) && !Engine.LabelUserChosen(new Account { Label = " ", Preset = "custom" }) && Engine.LabelUserChosen(new Account { Label = "Work", Preset = "custom" }), "label: user-chosen vs the wizard's default");
+            Ok(Engine.GenericLabel(new Account { Preset = "outlook" }, 0) == "Outlook" && Engine.GenericLabel(new Account { Preset = "custom", Email = "x@y.example" }, 2) == "Account 3", "label: made up without the address");
+            // the engine against the stand-in: each server answer becomes the right code, and a good sign-in clears it
+            var imap = new FakeImap(); var smtp = new FakeSmtp(); var dir = Path.Combine(Out, "attention"); Directory.CreateDirectory(dir);
+            var p = new Profile(); p.Fix(); var S = new MailSettings();
+            var acc = new Account { Id = "at1", Email = "alex@example.test", Name = "Alex", Label = "", Preset = "gmail", ImapHost = "127.0.0.1", ImapPort = imap.Port, ImapSecurity = "none", SmtpHost = "127.0.0.1", SmtpPort = smtp.Port, SmtpSecurity = "none", SendAs = new List<string>() };
+            var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0); l.Start(); int closed = ((System.Net.IPEndPoint)l.LocalEndpoint).Port; l.Stop();
+            var gone = new Account { Id = "at2", Email = "alex@example.test", Label = "Old server", Preset = "custom", ImapHost = "127.0.0.1", ImapPort = closed, ImapSecurity = "none", SmtpHost = "127.0.0.1", SmtpPort = closed, SmtpSecurity = "none", SendAs = new List<string>() };
+            p.Accounts.Add(acc); p.Accounts.Add(gone); Secrets.Set("pw:at1", imap.Pass); Secrets.Set("pw:at2", "x");
+            imap.LoginReply = "NO [ALERT] Application-specific password required: https://support.google.com/accounts/answer/185833";
+            var E = new Engine(p, S, new MailStore(Path.Combine(dir, "cache")));
+            try
+            {
+                E.Start(); var w = E.W("at1"); var w2 = E.W("at2");
+                Ok(Until(() => w.AttentionCode == "app-password-needed", 15000), "engine: Gmail-style answer -> app-password-needed (" + w.AttentionCode + ")");
+                Ok(Until(() => w2.AttentionCode == "server-unreachable", 15000), "engine: nothing listening -> server-unreachable (" + w2.AttentionCode + ")");
+                var stat = Family.Json(E.UnreadPerAccount());
+                Ok(stat.Contains("\"label\":\"Gmail\"") && stat.Contains("\"labelUserChosen\":false") && stat.Contains("\"label\":\"Old server\"") && stat.Contains("\"needsAttention\":true") && !stat.Contains("support.google") && !stat.Contains("@"), "status: codes and plain words only, no server text or address: " + stat);
+                imap.LoginReply = "NO [ALERT] Account exceeded command or bandwidth limits"; E.W("at1").Kick(true);
+                Ok(Until(() => w.AttentionCode == "quota", 20000), "engine: limits answer -> quota (" + w.AttentionCode + ")");
+                imap.LoginReply = null; w.Kick(true);
+                Ok(Until(() => w.AttentionCode == null && (w.State == "idle" || w.State == "synced"), 30000), "engine: a good sign-in clears it (" + w.AttentionCode + ", " + w.State + ")");
+            }
+            finally { E.StopAll(); imap.Stop(); smtp.Stop(); Secrets.RemoveAccount("at1"); Secrets.RemoveAccount("at2"); }
+        }
+
         // ---------------- the family pipe of a headless test copy (its own test folder and pipe name; no window, no tray)
         static string Cmd(string exe, string env, string line)
         {
@@ -597,16 +641,30 @@ namespace HallowEmail.Tests
             var env = Path.Combine(Out, "pipe-copy"); Directory.CreateDirectory(env);
             var psi = new ProcessStartInfo(exe, "--tray") { UseShellExecute = false, CreateNoWindow = true };
             psi.EnvironmentVariables["HALLOW_EMAIL_TESTDIR"] = env; psi.EnvironmentVariables["HALLOW_EMAIL_HEADLESS"] = "1";
-            var app = Process.Start(psi);
+            var app = Process.Start(psi); Children.Add(app);
+            var imap = new FakeImap(); var smtp = new FakeSmtp();
             try
             {
                 try { app.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
                 string ping = null; Ok(Until(() => (ping = Cmd(exe, env, "ping")).StartsWith("0 ok"), 15000), "pipe: ping answers: " + ping);
-                Ok(ping.Contains("\"app\":\"Email\"") && ping.Contains("\"version\":\"1.0\""), "pipe: app and version");
+                Ok(ping.Contains("\"app\":\"Email\"") && ping.Contains("\"version\":\"" + Program.Version + "\""), "pipe: app and version");
                 var st = Cmd(exe, env, "status");
                 Ok(st.StartsWith("0 ok {") && st.Contains("\"accounts\":[]") && st.Contains("\"unread\":0") && st.Contains("\"lastCrash\""), "pipe: status");
                 Ok(File.Exists(Path.Combine(env, "status.json")) && File.ReadAllText(Path.Combine(env, "status.json")).Contains("\"app\":\"Email\""), "pipe: status.json written in the test folder");
                 Ok(Cmd(exe, env, "menu").Contains("\"compose\""), "pipe: menu");
+                // 1.1: per-account unread + attention over the pipe, against the local IMAP / SMTP stand-in (never a real account)
+                imap.Add("INBOX", Mail("Sam Lee", "sam@example.org", "alex@example.test", "Lunch?", "Noodles at noon."));
+                imap.Add("INBOX", Mail("Riley", "riley@example.org", "alex@example.test", "Photos", "Here."));
+                Ok(Cmd(exe, env, "test-account pa1 gmail " + imap.Port + " " + smtp.Port + " " + imap.Pass).StartsWith("0 ok"), "pipe: a test account (the wizard's default label left empty)");
+                Ok(Cmd(exe, env, "test-account pa2 custom " + imap.Port + " " + smtp.Port + " wrong-pass me@home.example").StartsWith("0 ok"), "pipe: a second one, wrong password, labelled with an address by the user");
+                string accs = null;
+                Ok(Until(() => { accs = Cmd(exe, env, "accounts"); return accs.Contains("\"unread\":2,") && accs.Contains("\"attention\":\"sign-in-failed\""); }, 20000), "pipe: accounts: " + accs);
+                Ok(accs.Contains("\"id\":\"pa1\"") && accs.Contains("\"label\":\"Gmail\"") && accs.Contains("\"labelUserChosen\":false") && accs.Contains("\"needsAttention\":false"), "pipe: account 1 - opaque id, a made-up label (not chosen by the user), fine");
+                Ok(accs.Contains("\"id\":\"pa2\"") && accs.Contains("\"label\":\"me@home.example\"") && accs.Contains("\"labelUserChosen\":true") && accs.Contains("\"labelHasAddress\":true") && accs.Contains("\"needsAttention\":true") && accs.Contains("\"attentionText\":\"The mail server didn"), "pipe: account 2 - the user's own label is marked as theirs (and as an address), sign-in failed with plain words");
+                Ok(!accs.Contains("alex@example.test") && !accs.Contains("Noodles") && !accs.Contains("Lunch") && !accs.Contains("sam@") && !accs.Contains("Invalid credentials"), "pipe: no account address, no mail content, no server text");
+                Ok(accs.Contains("\"needsAttention\":1"), "pipe: one account needs attention");
+                st = Cmd(exe, env, "status"); var sj = File.ReadAllText(Path.Combine(env, "status.json"));
+                Ok(st.Contains("\"id\":\"pa2\"") && st.Contains("\"attention\":\"sign-in-failed\"") && sj.Contains("\"labelUserChosen\":false") && sj.Contains("\"needsAttention\":1") && !sj.Contains("alex@example.test"), "pipe: status and status.json carry the same");
                 Ok(Cmd(exe, env, "compose sam@example.org").StartsWith("0 ok"), "pipe: compose <to>");
                 Ok(Cmd(exe, env, "compose not-an-address").StartsWith("1 error"), "pipe: compose refuses a non-address");
                 Ok(Cmd(exe, env, "open inbox").StartsWith("0 ok") && Cmd(exe, env, "open nowhere").StartsWith("1 error"), "pipe: open <page>");
@@ -616,7 +674,7 @@ namespace HallowEmail.Tests
                 Ok(Cmd(exe, env, "quit").StartsWith("0 ok") && app.WaitForExit(8000), "pipe: quit");
                 Ok(Cmd(exe, env, "ping").StartsWith("2 "), "pipe: exit code 2 when not running");
             }
-            finally { try { if (!app.HasExited) app.Kill(); } catch { } }
+            finally { try { if (!app.HasExited) app.Kill(); } catch { } imap.Stop(); smtp.Stop(); }
         }
     }
 }

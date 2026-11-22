@@ -110,9 +110,17 @@ Windows 11; without it mail is shown as plain text).
 
 - Pipe `HallowFamily.Email.<user>` (this user only): `ping`, `status` (unread count per account - no subjects, senders or
   addresses), `open [inbox|people|newsletters|receipts|notifications|screener|spam|sent|drafts|unsubscribe|masked|rules|settings]`,
-  `compose <address>` (opens a new email - never sends), `menu`, `invoke <id>`, `sync`, `quit`. `HallowEmail.exe --cmd "<line>"`
+  `accounts` (1.1: just the per-account list below), `compose <address>` (opens a new email - never sends), `menu`, `invoke <id>`, `sync`, `quit`. `HallowEmail.exe --cmd "<line>"`
   prints the reply (exit 0 ok, 1 error, 2 not running). `HallowEmail.exe mailto:someone@example.com` opens a new email.
-- `%APPDATA%\HallowEmail\status.json`: `{"app":"Email","version":"1.0","running":true,"accounts":[{"account":"Personal","unread":3,"state":"idle"}],"unread":3,"outbox":0,"snoozed":1,"screener":false,"spamFilter":true,"look":"dark","startsWithWindows":false,"lastCrash":null}`.
+- `%APPDATA%\HallowEmail\status.json`: `{"app":"Email","version":"1.0","running":true,"accounts":[{"account":"Personal","unread":3,"state":"idle","id":"3f9a1c07","label":"Personal","labelUserChosen":true,"labelHasAddress":false,"needsAttention":false,"attention":null,"attentionText":null}],"unread":3,"needsAttention":0,"outbox":0,"snoozed":1,"screener":false,"spamFilter":true,"look":"dark","startsWithWindows":false,"lastCrash":null}`.
+- Per account (1.1): `id` is opaque (random when the account was added, never derived from the address); `label` is the label you
+  typed, or a made-up one ("Gmail", "Account 2") when you left it empty or kept the wizard's default - `labelUserChosen` says which,
+  and `labelHasAddress` says whether your own label looks like an email address, so Hallow Remote can decide whether to show it.
+  Addresses are never added by Hallow Email itself.
+- `needsAttention` / `attention` / `attentionText`: why an account isn't syncing, as a code and plain words - `sign-in-failed`,
+  `app-password-needed`, `server-unreachable`, `quota` (mailbox full or the provider's connection limits) or `error` (anything else).
+  Worked out from the error type and a few well-known server phrases; the server's own text and any mail content are never passed on.
+  The same reason shows on Settings > Accounts.
 - Hallow Hub hosts the tray icon (`tray-host`) and shows the new-mail notes (`notify`).
 - **Hallow Keys (later)**: a planned `masked-new <site>` pipe command so Keys can offer a fresh masked address while you sign up
   somewhere (only after you confirm in Hallow Email). Not in 1.0; Hallow Email never reads Keys' data.
@@ -121,9 +129,9 @@ Windows 11; without it mail is shown as plain text).
 
 `build.ps1` builds `HallowEmail.exe` with the C# compiler that ships with Windows (.NET Framework 4.8) against MailKit 5.0.0 /
 MimeKit.Core 5.0.0 and the WebView2 SDK in `lib\` (versions, hashes and licences: [licenses/THIRD-PARTY.md](licenses/THIRD-PARTY.md)).
-`build.ps1 -Tests` also builds `tests\EmailTests.exe`: 251 checks against **local stand-ins only** - a small IMAP4rev1 + SMTP server
+`build.ps1 -Tests` also builds `tests\EmailTests.exe`: 278 checks (with a 5-minute kill timeout) against **local stand-ins only** - a small IMAP4rev1 + SMTP server
 on 127.0.0.1 (sync, IDLE push, folders, search, conversations, flags, moves, rules, the Screener, spam to Junk, drafts, Undo send,
-Send later, retries, XOAUTH2), stand-in web endpoints for one-click unsubscribe, Cloudflare and the OAuth token endpoint, a stand-in
+Send later, retries, XOAUTH2, and the attention reasons from its sign-in answers or a closed port), stand-in web endpoints for one-click unsubscribe, Cloudflare and the OAuth token endpoint, a stand-in
 Microsoft Defender, the HTML / tracker / phishing / attachment fixtures, the spam filter on made-up ham and spam, cache encryption,
 the light palette's contrast, the WebView2 sandbox in an off-screen window, and the family pipe of a headless test copy.
 `HallowEmail.exe --snap <folder>` renders every window in dark and light with made-up mailboxes.

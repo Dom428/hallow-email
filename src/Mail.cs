@@ -334,11 +334,68 @@ namespace HallowEmail
             foreach (var a in P.Accounts)
             {
                 int n; lock (Store.Lock) { var idx = Store.Index(a.Id); var inbox = idx.Folders.FirstOrDefault(f => f.Role == "inbox"); n = inbox == null ? 0 : idx.Items.Count(i => i.Folder == inbox.Name && !i.Seen); }
-                r.Add(new Dictionary<string, object> { { "account", a.Label ?? a.Preset ?? "account" }, { "unread", n }, { "state", Simple(State(a.Id)) } });
+                var w = W(a.Id); var code = w == null ? null : w.AttentionCode; bool chosen = LabelUserChosen(a); var label = chosen ? a.Label.Trim() : GenericLabel(a, P.Accounts.IndexOf(a));
+                r.Add(new Dictionary<string, object> { { "account", string.IsNullOrEmpty(a.Label) ? label : a.Label }, { "unread", n }, { "state", Simple(State(a.Id)) },
+                    // 1.1: an opaque id (random, never derived from the address), the label with where it came from, and why it needs attention
+                    { "id", a.Id }, { "label", label }, { "labelUserChosen", chosen }, { "labelHasAddress", chosen && Attention.LooksLikeAddress(label) },
+                    { "needsAttention", code != null }, { "attention", code }, { "attentionText", Attention.Text(code) } });
             }
             return r;
         }
+        // the label is the user's own when they typed it (not empty, not the wizard's untouched default such as "Gmail")
+        public static bool LabelUserChosen(Account a)
+        {
+            if (a == null || string.IsNullOrWhiteSpace(a.Label)) return false;
+            var p = Preset.Get(a.Preset); var def = p == null || p.Id == "custom" ? "" : p.Name.Split(' ')[0];
+            return a.Label.Trim() != def;
+        }
+        // a label made up for Remote / Hub when the user didn't choose one: the provider's name, or "Account 2" - never the address
+        public static string GenericLabel(Account a, int index)
+        {
+            var p = Preset.Get(a.Preset);
+            return p != null && p.Id != "custom" ? p.Name.Split(' ')[0] : "Account " + (index + 1);
+        }
         static string Simple(string s) { return s == null ? "off" : s.StartsWith("error") ? "error" : s; }
+    }
+
+    // ---------------- why an account needs attention: a short code and plain words. Decided from the exception type and a few
+    // well-known server phrases; the server's own text, the address and any mail content are never passed on.
+    public static class Attention
+    {
+        public const string SignIn = "sign-in-failed", AppPassword = "app-password-needed", Unreachable = "server-unreachable", Quota = "quota", Other = "error";
+        public static readonly string[] Codes = { SignIn, AppPassword, Unreachable, Quota, Other };
+        public static string Classify(Exception e)
+        {
+            if (e == null) return null;
+            var all = new List<Exception>(); for (var x = e; x != null && all.Count < 8; x = x.InnerException) all.Add(x);
+            if (e is AggregateException) all.AddRange(((AggregateException)e).InnerExceptions);
+            var m = string.Join(" | ", all.Select(x => x.Message ?? "")).ToLowerInvariant();
+            if (m.Contains("overquota") || m.Contains("over quota") || m.Contains("quota exceeded") || m.Contains("exceeded quota") || m.Contains("mailbox is full") || m.Contains("mailbox full")
+                || m.Contains("[limit]") || m.Contains("too many simultaneous connections") || m.Contains("too many connections") || m.Contains("bandwidth limit") || m.Contains("exceeded command or bandwidth")) return Quota;
+            bool auth = all.Any(x => x is AuthenticationException) || m.Contains("authenticationfailed") || m.Contains("invalid credentials");
+            if (auth || m.Contains("application-specific password") || m.Contains("app password"))
+            {
+                if (m.Contains("application-specific password") || m.Contains("app password") || m.Contains("apppassword") || m.Contains("web browser") || m.Contains("weblogin")
+                    || m.Contains("basic authentication is disabled") || m.Contains("5.7.9") || m.Contains("5.7.139")) return AppPassword;
+                return SignIn;
+            }
+            if (all.Any(x => x is System.Net.Sockets.SocketException || x is TimeoutException || x is IOException || x is SslHandshakeException || x is ServiceNotConnectedException || x is ImapProtocolException)
+                || m.Contains("didn't answer in time") || m.Contains("no such host") || m.Contains("actively refused") || m.Contains("timed out")) return Unreachable;
+            return Other;
+        }
+        public static string Text(string code)
+        {
+            switch (code)
+            {
+                case null: return null;
+                case SignIn: return "The mail server didn't accept the sign-in. Check the password in Settings > Accounts, or sign in again.";
+                case AppPassword: return "The provider wants an app password (or its own sign-in) instead of your normal password. Create one in your account's security settings and paste it in Settings > Accounts.";
+                case Unreachable: return "Couldn't reach the mail server (offline, a wrong server name or a firewall). Hallow Email keeps trying.";
+                case Quota: return "The provider says a limit was reached: the mailbox is full or there were too many connections. Free up space or wait; Hallow Email keeps trying.";
+                default: return "Something went wrong syncing this account. Hallow Email keeps trying; Settings > Accounts > Edit > Test shows more.";
+            }
+        }
+        public static bool LooksLikeAddress(string s) { return s != null && System.Text.RegularExpressions.Regex.IsMatch(s, @"[^@\s]+@[^@\s]+\.[^@\s]+"); }
     }
 
     // ---------------- one account's IMAP connection
@@ -347,7 +404,7 @@ namespace HallowEmail
         readonly Engine E; public readonly Account A;
         readonly BlockingCollection<Action<ImapClient>> q = new BlockingCollection<Action<ImapClient>>();
         CancellationTokenSource stop = new CancellationTokenSource(), idleDone, wait;
-        Thread t; public volatile string State = "starting"; bool full = true; DateTime lastFull = DateTime.MinValue;
+        Thread t; public volatile string State = "starting"; public volatile string AttentionCode; /* null while fine (Attention.Codes) */ bool full = true; DateTime lastFull = DateTime.MinValue;
         public bool IdleSupported; public int Idles;
         public Worker(Engine e, Account a) { E = e; A = a; }
         public void Start() { t = new Thread(Loop) { IsBackground = true, Name = "imap " + A.Id, Priority = ThreadPriority.BelowNormal }; t.Start(); }
@@ -377,7 +434,7 @@ namespace HallowEmail
                         c.Connect(A.ImapHost, A.ImapPort, Engine.Sec(A.ImapSecurity, A.ImapHost), stop.Token);
                         var mech = E.Mechanism(A);
                         if (mech != null) c.Authenticate(mech, stop.Token); else c.Authenticate(A.UserName ?? A.Email, Secrets.Get("pw:" + A.Id) ?? "", stop.Token);
-                        E.Note(A.Id + ": signed in"); fails = 0;
+                        E.Note(A.Id + ": signed in"); fails = 0; AttentionCode = null;
                         IdleSupported = c.Capabilities.Contains(ImapCapability.Idle);
                         Folders(c); full = true;
                         while (!stop.IsCancellationRequested && c.IsConnected)
@@ -393,7 +450,7 @@ namespace HallowEmail
                 catch (OperationCanceledException) { }
                 catch (Exception e)
                 {
-                    fails++; State = "error: " + Clean(e is AuthenticationException ? "the server didn't accept the sign-in (" + e.Message + ")" : e.Message);
+                    fails++; AttentionCode = Attention.Classify(e); State = "error: " + Clean(e is AuthenticationException ? "the server didn't accept the sign-in (" + e.Message + ")" : e.Message);
                     E.Note(A.Id + ": " + State); E.Fire();
                     // anything that was waiting gets an answer (the error)
                     Action<ImapClient> a; while (q.TryTake(out a)) { try { a(null); } catch { } }

@@ -26,6 +26,7 @@ namespace HallowEmail.Tests
         public readonly Dictionary<string, FakeFolder> Folders = new Dictionary<string, FakeFolder>(StringComparer.OrdinalIgnoreCase);
         public string User = "alex@example.test", Pass = "app-pass-1234", Token;   // Token: the OAuth access token XOAUTH2 accepts
         public readonly List<string> Log = new List<string>(); public int Logins, Idles;
+        public volatile string LoginReply;   // e.g. "NO [ALERT] Application-specific password required": every LOGIN gets this answer
         readonly List<Session> sessions = new List<Session>();
         public FakeImap()
         {
@@ -153,7 +154,7 @@ namespace HallowEmail.Tests
                     case "LOGOUT": Send("* BYE bye"); Send(tag + " OK LOGOUT completed"); return false;
                     case "ID": Send("* ID NIL"); Send(tag + " OK ID completed"); return true;
                     case "LOGIN":
-                        if (a.Count >= 2 && a[0] == S.User && a[1] == S.Pass) { S.Logins++; Send(tag + " OK LOGIN completed"); } else Send(tag + " NO [AUTHENTICATIONFAILED] Invalid credentials");
+                        if (S.LoginReply != null) Send(tag + " " + S.LoginReply); else if (a.Count >= 2 && a[0] == S.User && a[1] == S.Pass) { S.Logins++; Send(tag + " OK LOGIN completed"); } else Send(tag + " NO [AUTHENTICATIONFAILED] Invalid credentials");
                         return true;
                     case "AUTHENTICATE":
                         {
@@ -163,7 +164,8 @@ namespace HallowEmail.Tests
                             bool ok = false;
                             if (a[0].Equals("PLAIN", StringComparison.OrdinalIgnoreCase)) { var p = dec.Split('\0'); ok = p.Length == 3 && p[1] == S.User && p[2] == S.Pass; }
                             else if (a[0].Equals("XOAUTH2", StringComparison.OrdinalIgnoreCase)) ok = S.Token != null && dec == "user=" + S.User + "\u0001auth=Bearer " + S.Token + "\u0001\u0001";
-                            if (ok) { S.Logins++; Send(tag + " OK AUTHENTICATE completed"); }
+                            if (S.LoginReply != null) Send(tag + " " + S.LoginReply);
+                            else if (ok) { S.Logins++; Send(tag + " OK AUTHENTICATE completed"); }
                             else { if (a[0].Equals("XOAUTH2", StringComparison.OrdinalIgnoreCase)) { Send("+ eyJzdGF0dXMiOiI0MDEifQ=="); ReadLine(); } Send(tag + " NO [AUTHENTICATIONFAILED] Invalid credentials"); }
                             return true;
                         }

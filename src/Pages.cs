@@ -62,6 +62,8 @@ namespace HallowEmail
                 var info = new StackPanel();
                 info.Children.Add(Icons.WithText(Preset.Get(a.Preset).Icon, a.Display + "  -  " + a.Email, 13, Ui.R("Text")));
                 info.Children.Add(Ui.Muted((a.Auth == "password" ? "App password" : "OAuth (" + (a.Auth == "oauth-google" ? "Google" : "Microsoft") + ")") + "  |  " + MainWindow.StateText(Snap.On ? "idle" : c.E.State(a.Id)), 11.5));
+                var wk = c.E.W(a.Id); var att = Snap.On || wk == null ? null : wk.AttentionCode;
+                if (att != null) { var at = Ui.Muted("Needs attention: " + Attention.Text(att), 11.5); at.Foreground = Ui.R("Amber"); info.Children.Add(at); }
                 row.Children.Add(info); acc.Children.Add(row);
             }
             if (c.P.Accounts.Count == 0) acc.Children.Add(Ui.Muted("No accounts yet.", 12.5, 8));
