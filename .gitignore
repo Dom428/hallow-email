@@ -1,0 +1,8 @@
+# build output
+HallowEmail.exe
+/*.dll
+tests/*.exe
+tests/*.dll
+tests/out/
+package/HallowEmail.exe
+package/*.dll
