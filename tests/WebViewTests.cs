@@ -35,7 +35,7 @@ namespace HallowEmail.Tests
             try
             {
                 win.Show();
-                CoreWebView2Environment.CreateAsync(null, Path.Combine(outDir, "wv2"), new CoreWebView2EnvironmentOptions("--disable-background-networking --no-pings")).ContinueWith(t =>
+                CoreWebView2Environment.CreateAsync(null, Path.Combine(outDir, "wv2"), new CoreWebView2EnvironmentOptions("--disable-background-networking --no-pings --mute-audio")).ContinueWith(t =>
                 {
                     if (t.Exception != null) { err = t.Exception.InnerException; return; }
                     env = t.Result;
@@ -45,6 +45,7 @@ namespace HallowEmail.Tests
                 web.EnsureCoreWebView2Async(env).ContinueWith(t => { if (t.Exception != null) err = t.Exception.InnerException; else ready = true; }, TaskScheduler.FromCurrentSynchronizationContext());
                 Pump(() => ready || err != null, 30000);
                 if (!ready) { ok(false, "webview2: init " + (err == null ? "timed out" : err.Message)); return; }
+                web.CoreWebView2.IsMuted = true; // every test browser is muted before it navigates
                 Reader.Lockdown(web.CoreWebView2, env, () => false, u => link = u);
                 bool loaded = false; web.CoreWebView2.NavigationCompleted += (s, e) => loaded = true;
                 // a hostile page WITHOUT our cleaning or CSP, so the WebView2 rules alone are tested
